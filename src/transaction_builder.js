@@ -174,7 +174,7 @@ function expandInput (scriptSig, witnessStack) {
 }
 
 // could be done in expandInput, but requires the original Transaction for hashForSignature
-function fixMultisigOrder (input, transaction, vin) {
+function fixMultisigOrder (input, transaction, vin, value, network) {
   if (input.redeemScriptType !== scriptTypes.MULTISIG || !input.redeemScript) return
   if (input.pubKeys.length === input.signatures.length) return
 
@@ -191,7 +191,23 @@ function fixMultisigOrder (input, transaction, vin) {
 
       // TODO: avoid O(n) hashForSignature
       var parsed = ECSignature.parseScriptSignature(signature)
-      var hash = transaction.hashForSignature(vin, input.redeemScript, parsed.hashType)
+      var hash
+
+      switch (network.ticker) {
+        case 'bch':
+          hash = transaction.hashForCashSignature(vin, input.signScript, value, parsed.hashType)
+          break
+        case 'btg':
+          hash = transaction.hashForGoldSignature(vin, input.signScript, value, parsed.hashType)
+          break
+        default:
+          if (input.witness) {
+            hash = transaction.hashForWitnessV0(vin, input.signScript, value, parsed.hashType)
+          } else {
+            hash = transaction.hashForSignature(vin, input.signScript, parsed.hashType)
+          }
+          break
+      }
 
       // skip if signature does not match pubKey
       if (!keyPair.verify(hash, parsed.signature)) return false
@@ -474,6 +490,9 @@ function TransactionBuilder (network, maximumFeeRate) {
   // WARNING: This is __NOT__ to be relied on, its just another potential safety mechanism (safety in-depth)
   this.maximumFeeRate = maximumFeeRate || 2500
 
+  this.bitcoinCash = network.ticker == 'bch';
+  this.bitcoinGold = network.ticker == 'btg';
+
   this.inputs = []
   this.tx = new Transaction()
 }
@@ -523,7 +542,7 @@ TransactionBuilder.fromTransaction = function (transaction, network) {
 
   // fix some things not possible through the public API
   txb.inputs.forEach(function (input, i) {
-    fixMultisigOrder(input, transaction, i)
+    fixMultisigOrder(input, transaction, i, input.value, network)
   })
 
   return txb
@@ -669,6 +688,8 @@ function canSign (input) {
     )
 }
 
+
+
 TransactionBuilder.prototype.sign = function (vin, keyPair, redeemScript, hashType, witnessValue, witnessScript) {
   // TODO: remove keyPair.network matching in 4.0.0
   if (keyPair.network && keyPair.network !== this.network) throw new TypeError('Inconsistent network')
@@ -698,10 +719,16 @@ TransactionBuilder.prototype.sign = function (vin, keyPair, redeemScript, hashTy
 
   // ready to sign
   var signatureHash
-  if (input.witness) {
-    signatureHash = this.tx.hashForWitnessV0(vin, input.signScript, input.value, hashType)
+  if (this.bitcoinGold) {
+    signatureHash = this.tx.hashForGoldSignature(vin, input.signScript, witnessValue, hashType, input.witness)
+  } else if (this.bitcoinCash) {
+    signatureHash = this.tx.hashForCashSignature(vin, input.signScript, witnessValue, hashType)
   } else {
-    signatureHash = this.tx.hashForSignature(vin, input.signScript, hashType)
+    if (input.witness) {
+      signatureHash = this.tx.hashForWitnessV0(vin, input.signScript, witnessValue, hashType)
+    } else {
+      signatureHash = this.tx.hashForSignature(vin, input.signScript, hashType)
+    }
   }
 
   // enforce in order signing of public keys
